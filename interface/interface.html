@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orchestrateur Docker Intelligent</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        input, select, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .container-list {
+            list-style: none;
+        }
+
+        .container-item {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .container-item strong {
+            color: #667eea;
+        }
+
+        .status-badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-running {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-stopped {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .metric-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        #graphCanvas {
+            width: 100% !important;
+            height: 400px !important;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 20px;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .relation-list {
+            list-style: none;
+        }
+
+        .relation-item {
+            background: #e9ecef;
+            padding: 10px;
+            margin-bottom: 8px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+
+        .graph-toolbar {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .graph-toolbar button {
+            width: auto;
+            margin-top: 0;
+            padding: 10px 14px;
+            font-size: 14px;
+        }
+
+        .graph-toolbar select {
+            width: auto;
+            min-width: 180px;
+        }
+
+        .graph-toolbar .danger {
+            background: #dc3545;
+        }
+
+        .graph-toolbar .secondary {
+            background: #6c757d;
+        }
+
+        .graph-status {
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #444;
+        }
+
+        .graph-actions {
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(102, 126, 234, 0.08);
+            border: 1px solid rgba(102, 126, 234, 0.25);
+            border-radius: 10px;
+        }
+
+        .graph-actions-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-top: 8px;
+        }
+
+        .graph-actions-title {
+            font-family: monospace;
+            font-size: 12px;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐳 Orchestrateur Docker Intelligent</h1>
+        
+        <div class="dashboard">
+            <!-- Créer un conteneur -->
+            <div class="card">
+                <h2>🚀 Créer un Conteneur</h2>
+                <div class="form-group">
+                    <label>Nom du conteneur:</label>
+                    <input type="text" id="containerName" placeholder="ex: web-server-1">
+                </div>
+                <div class="form-group">
+                    <label>Image Docker:</label>
+                    <input type="text" id="containerImage" placeholder="ex: nginx:latest" value="orchestrator-worker">
+                </div>
+                <div class="form-group">
+                    <label>Variables d'environnement (JSON):</label>
+                    <textarea id="containerEnv" rows="3" placeholder='{"KEY": "value"}'></textarea>
+                </div>
+                <button onclick="createContainer()">Créer le conteneur</button>
+                <div id="createAlert"></div>
+            </div>
+
+            <!-- Ajouter une relation -->
+            <div class="card">
+                <h2>🔗 Gérer les Relations</h2>
+                <div class="form-group">
+                    <label>Conteneur source:</label>
+                    <input type="text" id="relationFrom" placeholder="ex: web-server-1">
+                </div>
+                <div class="form-group">
+                    <label>Conteneur cible:</label>
+                    <input type="text" id="relationTo" placeholder="ex: database-1">
+                </div>
+                <div class="form-group">
+                    <label>Type de relation:</label>
+                    <select id="relationType">
+                        <option value="depends_on">Dépend de</option>
+                        <option value="communicates_with">Communique avec</option>
+                        <option value="uses">Utilise</option>
+                        <option value="master_of">Master → Worker</option>
+                    </select>
+                </div>
+                <button onclick="addRelation()">Ajouter la relation</button>
+                <button onclick="removeRelation()" style="margin-top: 10px; background: #dc3545;">Supprimer la relation</button>
+                <div id="relationAlert"></div>
+                
+                <h3 style="margin-top: 20px; color: #667eea;">Relations existantes:</h3>
+                <ul class="relation-list" id="relationsList"></ul>
+            </div>
+
+            <!-- Liste des conteneurs -->
+            <div class="card">
+                <h2>📦 Conteneurs Actifs</h2>
+                <button onclick="refreshContainers()" style="margin-bottom: 15px;">🔄 Actualiser</button>
+                <ul class="container-list" id="containersList"></ul>
+            </div>
+
+            <!-- Métriques globales -->
+            <div class="card">
+                <h2>📊 Métriques Globales</h2>
+                <div class="metrics-grid">
+                    <div class="metric-box">
+                        <div class="metric-label">Conteneurs Actifs</div>
+                        <div class="metric-value" id="totalContainers">0</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Relations</div>
+                        <div class="metric-value" id="totalRelations">0</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Événements Scaling</div>
+                        <div class="metric-value" id="scalingEvents">0</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Charge Moyenne</div>
+                        <div class="metric-value" id="avgLoad">0%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>⚡ Générer un Flux</h2>
+                <div class="form-group">
+                    <label>Cible:</label>
+                    <select id="trafficTarget">
+                        <option value="">-- Choisir un conteneur --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>RPS (requêtes / seconde):</label>
+                    <input type="number" id="trafficRps" min="0" step="1" value="10">
+                </div>
+                <div class="form-group">
+                    <label>Complexité:</label>
+                    <input type="number" id="trafficComplexity" min="1" step="1" value="5">
+                </div>
+                <div class="form-group">
+                    <label>Durée (secondes) - optionnel:</label>
+                    <input type="number" id="trafficDuration" min="1" step="1" placeholder="ex: 30">
+                </div>
+                <button onclick="startTraffic()">Démarrer le flux</button>
+                <button onclick="stopTraffic()" style="margin-top: 10px; background: #dc3545;">Arrêter le flux</button>
+                <div id="trafficAlert"></div>
+                <div style="margin-top: 10px; font-family: monospace; font-size: 12px; color: #444;">
+                    <div>Job: <span id="trafficJobId">-</span></div>
+                    <div>Envoyées: <span id="trafficSent">0</span></div>
+                    <div>Erreurs: <span id="trafficErrors">0</span></div>
+                    <div>Running: <span id="trafficRunning">false</span></div>
+                    <div>Dernière cible: <span id="trafficLastTarget">-</span></div>
+                    <div>Dernier status: <span id="trafficLastStatus">-</span></div>
+                    <div>Dernière erreur: <span id="trafficLastError">-</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graphe de dépendances -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h2>🌐 Graphe de Dépendances</h2>
+            <div class="graph-toolbar">
+                <button class="secondary" onclick="setGraphMode('select')">Sélection</button>
+                <button onclick="createWorkerFromGraph()">+ Worker</button>
+                <select id="graphRelationType">
+                    <option value="depends_on">Dépend de</option>
+                    <option value="communicates_with">Communique avec</option>
+                    <option value="uses">Utilise</option>
+                    <option value="master_of">Master → Worker</option>
+                    <option value="replica_of">Replica → Parent</option>
+                </select>
+                <button onclick="setGraphMode('add_link')">+ Lien</button>
+                <button class="secondary" onclick="setGraphMode('remove_link')">- Lien</button>
+                <button class="danger" onclick="deleteSelectedFromGraph()">Supprimer (node)</button>
+                <button class="danger" onclick="removeSelectedEdgeFromGraph()">Supprimer (lien)</button>
+            </div>
+            <canvas id="graphCanvas"></canvas>
+            <div id="graphAlert"></div>
+            <div class="graph-status" id="graphStatus">Mode: sélection</div>
+            <div class="graph-actions" id="graphActions">
+                <div class="graph-actions-title" id="graphSelectionText">Sélection: aucune</div>
+                <div class="graph-actions-row">
+                    <button class="secondary" onclick="startAddLinkFromSelected()">+ relation</button>
+                    <button class="secondary" onclick="startRemoveLinkFromSelected()">- relation</button>
+                    <button onclick="createContainerLinkedFromSelected()">+ conteneur relié</button>
+                    <button class="danger" onclick="deleteSelectedFromGraph()">Supprimer conteneur</button>
+                    <button class="danger" onclick="removeSelectedEdgeFromGraph()">Supprimer lien sélectionné</button>
+                </div>
+                <div class="graph-actions-title" id="graphHintText" style="margin-top: 8px;">Astuce: clique un node pour le sélectionner.</div>
+            </div>
+        </div>
+
+        <!-- Graphiques de monitoring -->
+        <div class="card">
+            <h2>📈 Monitoring en Temps Réel</h2>
+            <div class="form-group">
+                <label>Sélectionner un conteneur:</label>
+                <select id="monitorContainer">
+                    <option value="">-- Choisir un conteneur --</option>
+                </select>
+            </div>
+            <div class="chart-container">
+                <canvas id="metricsChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5000';
+        let metricsChart = null;
+        let relations = [];
+        let currentTrafficJobId = null;
+        let graphData = null;
+
+        let graphMode = 'select';
+        let graphLinkFrom = null;
+        let selectedNodeId = null;
+        let selectedEdge = null; // {from,to,type}
+        let nodeHitBoxes = new Map();
+        let edgeHitLines = [];
+
+        // Créer un conteneur
+        async function createContainer() {
+            const name = document.getElementById('containerName').value;
+            const image = document.getElementById('containerImage').value;
+            const envText = document.getElementById('containerEnv').value;
+            
+            let env = {};
+            if (envText) {
+                try {
+                    env = JSON.parse(envText);
+                } catch (e) {
+                    showAlert('createAlert', 'Erreur: JSON invalide', 'error');
+                    return;
+                }
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/container/create`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, image, env})
+                });
+                
+                const result = await response.json();
+                showAlert('createAlert', `✅ Conteneur créé: ${name}`, 'success');
+                refreshContainers();
+                updateMonitorSelect();
+            } catch (error) {
+                showAlert('createAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        // Ajouter une relation
+        async function addRelation() {
+            const from = document.getElementById('relationFrom').value;
+            const to = document.getElementById('relationTo').value;
+            const type = document.getElementById('relationType').value;
+
+            try {
+                const response = await fetch(`${API_URL}/relation/add`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({from, to, type})
+                });
+                
+                showAlert('relationAlert', '✅ Relation ajoutée', 'success');
+                relations.push({from, to, type});
+                updateRelationsList();
+                document.getElementById('totalRelations').textContent = relations.length;
+            } catch (error) {
+                showAlert('relationAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        async function removeRelation() {
+            const from = document.getElementById('relationFrom').value;
+            const to = document.getElementById('relationTo').value;
+            const type = document.getElementById('relationType').value;
+
+            if (!from || !to) {
+                showAlert('relationAlert', 'Erreur: from/to manquants', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/relation/remove`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({from, to, type})
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('relationAlert', `❌ Erreur: ${result.error || 'remove failed'}`, 'error');
+                    return;
+                }
+
+                relations = relations.filter(r => !(r.from === from && r.to === to && r.type === type));
+                updateRelationsList();
+                document.getElementById('totalRelations').textContent = relations.length;
+                showAlert('relationAlert', '🗑️ Relation supprimée', 'success');
+            } catch (error) {
+                showAlert('relationAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        // Actualiser la liste des conteneurs
+        async function refreshContainers() {
+            try {
+                const response = await fetch(`${API_URL}/containers/list`);
+                const data = await response.json();
+                
+                const list = document.getElementById('containersList');
+                list.innerHTML = '';
+                
+                data.containers.forEach(container => {
+                    const li = document.createElement('li');
+                    li.className = 'container-item';
+                    const replicasCount = (container.replicas || []).length;
+                    li.innerHTML = `
+                        <strong>${container.name}</strong>
+                        <span class="status-badge status-running">Running</span>
+                        <span class="replicas-badge">Répliques: ${replicasCount}</span>
+                    `;
+                    list.appendChild(li);
+                });
+                
+                document.getElementById('totalContainers').textContent = data.containers.length;
+            } catch (error) {
+                console.error('Erreur:', error);
+            }
+        }
+
+        // Mettre à jour la liste des relations
+        function updateRelationsList() {
+            const list = document.getElementById('relationsList');
+            list.innerHTML = '';
+            
+            relations.forEach(rel => {
+                const li = document.createElement('li');
+                li.className = 'relation-item';
+                const safeFrom = String(rel.from).replace(/'/g, "\\'");
+                const safeTo = String(rel.to).replace(/'/g, "\\'");
+                const safeType = String(rel.type).replace(/'/g, "\\'");
+                li.innerHTML = `<span>${rel.from} → ${rel.to} (${rel.type})</span> <button style="margin-left:10px; padding: 4px 8px; background:#dc3545;" onclick="quickRemoveRelation('${safeFrom}','${safeTo}','${safeType}')">Supprimer</button>`;
+                list.appendChild(li);
+            });
+        }
+
+        async function quickRemoveRelation(from, to, type) {
+            document.getElementById('relationFrom').value = from;
+            document.getElementById('relationTo').value = to;
+            document.getElementById('relationType').value = type;
+            await removeRelation();
+        }
+
+        // Mettre à jour le select de monitoring
+        async function updateMonitorSelect() {
+            try {
+                const response = await fetch(`${API_URL}/containers/list`);
+                const data = await response.json();
+
+                const select = document.getElementById('monitorContainer');
+                select.innerHTML = '<option value="">-- Choisir un conteneur --</option>';
+
+                data.containers.forEach(container => {
+                    const option = document.createElement('option');
+                    option.value = container.name;
+                    option.textContent = container.name;
+                    select.appendChild(option);
+                });
+
+                const trafficSelect = document.getElementById('trafficTarget');
+                trafficSelect.innerHTML = '<option value="">-- Choisir un conteneur --</option>';
+                data.containers.forEach(container => {
+                    const option = document.createElement('option');
+                    option.value = container.name;
+                    option.textContent = container.name;
+                    trafficSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Erreur:', error);
+            }
+        }
+
+        async function startTraffic() {
+            const target = document.getElementById('trafficTarget').value;
+            const rps = Number(document.getElementById('trafficRps').value || 0);
+            const complexity = Number(document.getElementById('trafficComplexity').value || 1);
+            const durationText = document.getElementById('trafficDuration').value;
+            const duration_seconds = durationText ? Number(durationText) : null;
+
+            if (!target) {
+                showAlert('trafficAlert', 'Erreur: cible manquante', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/traffic/start`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({target, rps, complexity, duration_seconds, direct: true})
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('trafficAlert', `❌ Erreur: ${result.error || 'start failed'}`, 'error');
+                    return;
+                }
+
+                currentTrafficJobId = result.job.id;
+                document.getElementById('trafficJobId').textContent = currentTrafficJobId;
+                showAlert('trafficAlert', `✅ Flux démarré: ${target}`, 'success');
+            } catch (error) {
+                showAlert('trafficAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        async function stopTraffic() {
+            if (!currentTrafficJobId) {
+                showAlert('trafficAlert', 'Erreur: aucun job actif', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/traffic/stop`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: currentTrafficJobId})
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('trafficAlert', `❌ Erreur: ${result.error || 'stop failed'}`, 'error');
+                    return;
+                }
+
+                showAlert('trafficAlert', '🛑 Arrêt demandé', 'success');
+            } catch (error) {
+                showAlert('trafficAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        async function refreshTrafficStatus() {
+            try {
+                const response = await fetch(`${API_URL}/traffic/status`);
+                const result = await response.json();
+                const jobs = result.jobs || [];
+
+                let job = null;
+                if (currentTrafficJobId) {
+                    job = jobs.find(j => j.id === currentTrafficJobId);
+                }
+
+                if (!job && jobs.length > 0 && !currentTrafficJobId) {
+                    job = jobs[jobs.length - 1];
+                    currentTrafficJobId = job.id;
+                    document.getElementById('trafficJobId').textContent = currentTrafficJobId;
+                }
+
+                if (job) {
+                    document.getElementById('trafficSent').textContent = job.sent;
+                    document.getElementById('trafficErrors').textContent = job.errors;
+                    document.getElementById('trafficRunning').textContent = job.running;
+                    document.getElementById('trafficLastTarget').textContent = job.last_target || '-';
+                    document.getElementById('trafficLastStatus').textContent = (job.last_status_code !== null && job.last_status_code !== undefined) ? job.last_status_code : '-';
+                    document.getElementById('trafficLastError').textContent = job.last_error || '-';
+                }
+            } catch (error) {
+                showAlert('trafficAlert', `❌ Erreur: ${error.message}`, 'error');
+            }
+        }
+
+        async function refreshGraph() {
+            try {
+                const response = await fetch(`${API_URL}/graph/export`);
+                const data = await response.json();
+                const g = (data && Object.prototype.hasOwnProperty.call(data, 'graph')) ? data.graph : data;
+                if (typeof g === 'string') {
+                    try {
+                        graphData = JSON.parse(g);
+                    } catch (e) {
+                        graphData = null;
+                        showAlert('graphAlert', `❌ Graphe invalide (JSON): ${e.message}`, 'error');
+                    }
+                } else {
+                    graphData = g;
+                }
+                try {
+                    const nNodes = (graphData && Array.isArray(graphData.nodes)) ? graphData.nodes.length : 0;
+                    const nLinks = (graphData && Array.isArray(graphData.links)) ? graphData.links.length : 0;
+                    setGraphStatus(`Graphe: ${nNodes} nodes, ${nLinks} liens`);
+                    if (nNodes === 0) {
+                        showAlert('graphAlert', '⚠️ Graphe vide: /graph/export ne renvoie aucun node. Vérifie que des conteneurs sont détectés côté orchestrateur.', 'error');
+                    }
+                } catch (e) {
+                }
+                drawGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur chargement graphe: ${e.message}`, 'error');
+            }
+        }
+
+        function setGraphMode(mode) {
+            graphMode = mode;
+            graphLinkFrom = null;
+            if (mode === 'select') {
+                setGraphStatus('Mode: sélection');
+                updateGraphActionsUI();
+                return;
+            }
+            if (mode === 'add_link') {
+                setGraphStatus('Mode: + lien (clique source puis cible)');
+                updateGraphActionsUI();
+                return;
+            }
+            if (mode === 'remove_link') {
+                setGraphStatus('Mode: - lien (clique source puis cible)');
+                updateGraphActionsUI();
+                return;
+            }
+        }
+
+        function setGraphStatus(text) {
+            const el = document.getElementById('graphStatus');
+            if (el) el.textContent = text;
+        }
+
+        function getGraphRelationType() {
+            const el = document.getElementById('graphRelationType');
+            return el ? el.value : 'depends_on';
+        }
+
+        function startAddLinkFromSelected() {
+            if (!selectedNodeId) {
+                showAlert('graphAlert', "Sélectionne d'abord un conteneur", 'error');
+                return;
+            }
+            graphMode = 'add_link';
+            graphLinkFrom = String(selectedNodeId);
+            setGraphStatus(`Mode: + lien (source=${graphLinkFrom}) → clique la cible`);
+            updateGraphActionsUI();
+            drawGraph();
+        }
+
+        function startRemoveLinkFromSelected() {
+            if (!selectedNodeId) {
+                showAlert('graphAlert', "Sélectionne d'abord un conteneur", 'error');
+                return;
+            }
+            graphMode = 'remove_link';
+            graphLinkFrom = String(selectedNodeId);
+            setGraphStatus(`Mode: - lien (source=${graphLinkFrom}) → clique la cible`);
+            updateGraphActionsUI();
+            drawGraph();
+        }
+
+        async function createContainerLinkedFromSelected() {
+            if (!selectedNodeId) {
+                showAlert('graphAlert', "Sélectionne d'abord un conteneur", 'error');
+                return;
+            }
+
+            const suggested = `worker_${Math.floor(Math.random() * 10000)}`;
+            const name = prompt('Nom du conteneur à créer:', suggested);
+            if (!name) return;
+
+            const type = getGraphRelationType();
+            try {
+                const response = await fetch(`${API_URL}/container/create`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, image: 'orchestrator-worker', env: {}})
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('graphAlert', `❌ Erreur création: ${result.error || 'create failed'}`, 'error');
+                    return;
+                }
+
+                await addLinkFromGraph(String(selectedNodeId), String(name), type);
+                showAlert('graphAlert', `✅ Conteneur créé et relié: ${selectedNodeId} → ${name} (${type})`, 'success');
+                await refreshContainers();
+                await updateMonitorSelect();
+                await refreshGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur: ${e.message}`, 'error');
+            }
+        }
+
+        async function createWorkerFromGraph() {
+            const suggested = `worker_${Math.floor(Math.random() * 10000)}`;
+            const name = prompt('Nom du worker à créer:', suggested);
+            if (!name) return;
+
+            try {
+                const response = await fetch(`${API_URL}/container/create`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, image: 'orchestrator-worker', env: {}})
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('graphAlert', `❌ Erreur création: ${result.error || 'create failed'}`, 'error');
+                    return;
+                }
+
+                showAlert('graphAlert', `✅ Worker créé: ${name}`, 'success');
+                await refreshContainers();
+                await updateMonitorSelect();
+                await refreshGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur: ${e.message}`, 'error');
+            }
+        }
+
+        async function deleteSelectedFromGraph() {
+            if (!selectedNodeId) {
+                showAlert('graphAlert', 'Erreur: aucun node sélectionné', 'error');
+                return;
+            }
+            if (selectedNodeId === 'orchestrator_main') {
+                showAlert('graphAlert', 'Impossible de supprimer orchestrator_main', 'error');
+                return;
+            }
+            const ok = confirm(`Supprimer le conteneur ${selectedNodeId} ?`);
+            if (!ok) return;
+
+            try {
+                const response = await fetch(`${API_URL}/container/${encodeURIComponent(selectedNodeId)}/remove`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('graphAlert', `❌ Erreur suppression: ${result.error || 'remove failed'}`, 'error');
+                    return;
+                }
+                selectedNodeId = null;
+                selectedEdge = null;
+                showAlert('graphAlert', '🗑️ Conteneur supprimé', 'success');
+                await refreshContainers();
+                await updateMonitorSelect();
+                await refreshGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur: ${e.message}`, 'error');
+            }
+        }
+
+        async function addLinkFromGraph(from, to, type) {
+            try {
+                const response = await fetch(`${API_URL}/relation/add`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({from, to, type})
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('graphAlert', `❌ Erreur ajout lien: ${result.error || 'add failed'}`, 'error');
+                    return;
+                }
+                showAlert('graphAlert', `✅ Lien ajouté: ${from} → ${to} (${type})`, 'success');
+                await refreshGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur: ${e.message}`, 'error');
+            }
+        }
+
+        async function removeLinkFromGraph(from, to, type) {
+            try {
+                const response = await fetch(`${API_URL}/relation/remove`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({from, to, type})
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    showAlert('graphAlert', `❌ Erreur suppression lien: ${result.error || 'remove failed'}`, 'error');
+                    return;
+                }
+                showAlert('graphAlert', `🗑️ Lien supprimé: ${from} → ${to} (${type || 'any'})`, 'success');
+                await refreshGraph();
+            } catch (e) {
+                showAlert('graphAlert', `❌ Erreur: ${e.message}`, 'error');
+            }
+        }
+
+        async function removeSelectedEdgeFromGraph() {
+            if (!selectedEdge) {
+                showAlert('graphAlert', 'Erreur: aucun lien sélectionné', 'error');
+                return;
+            }
+            const ok = confirm(`Supprimer le lien ${selectedEdge.from} → ${selectedEdge.to} (${selectedEdge.type}) ?`);
+            if (!ok) return;
+            await removeLinkFromGraph(selectedEdge.from, selectedEdge.to, selectedEdge.type);
+            selectedEdge = null;
+        }
+
+            function distancePointToSegment(px, py, x1, y1, x2, y2) {
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                if (dx === 0 && dy === 0) {
+                    const ddx = px - x1;
+                    const ddy = py - y1;
+                    return Math.sqrt(ddx * ddx + ddy * ddy);
+                }
+                const t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+                const clamped = Math.max(0, Math.min(1, t));
+                const cx = x1 + clamped * dx;
+                const cy = y1 + clamped * dy;
+                const ddx = px - cx;
+                const ddy = py - cy;
+                return Math.sqrt(ddx * ddx + ddy * ddy);
+            }
+
+            function drawGraph() {
+                const canvas = document.getElementById('graphCanvas');
+                if (!canvas) return;
+
+                const ctx = canvas.getContext('2d');
+
+                if (!ctx.roundRect) {
+                    ctx.roundRect = function(x, y, w, h, r) {
+                        const radius = Math.max(0, Math.min(r || 0, Math.min(w, h) / 2));
+                        this.beginPath();
+                        this.moveTo(x + radius, y);
+                        this.lineTo(x + w - radius, y);
+                        this.arcTo(x + w, y, x + w, y + h, radius);
+                        this.lineTo(x + w, y + h - radius);
+                        this.arcTo(x + w, y + h, x, y + h, radius);
+                        this.lineTo(x + radius, y + h);
+                        this.arcTo(x, y + h, x, y, radius);
+                        this.lineTo(x, y + radius);
+                        this.arcTo(x, y, x + w, y, radius);
+                        return this;
+                    };
+                }
+                const rect = canvas.getBoundingClientRect();
+                canvas.width = Math.max(600, Math.floor(rect.width));
+                canvas.height = 420;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                if (!graphData || !graphData.nodes) {
+                    ctx.fillStyle = '#666';
+                    ctx.font = '14px sans-serif';
+                    ctx.fillText('Aucun graphe à afficher', 20, 30);
+                    return;
+                }
+
+                const nodes = graphData.nodes.map(n => n.id ?? n); // node_link_data
+                const links = graphData.links || [];
+
+                nodeHitBoxes = new Map();
+                edgeHitLines = [];
+
+                // layout en cercle
+                const positions = new Map();
+                const n = nodes.length || 1;
+                const cx = canvas.width / 2;
+                const cy = canvas.height / 2;
+                const radius = Math.min(cx, cy) * 0.65;
+
+                nodes.forEach((id, i) => {
+                    const angle = (2 * Math.PI * i) / n;
+                    const x = cx + radius * Math.cos(angle);
+                    const y = cy + radius * Math.sin(angle);
+                    positions.set(String(id), {x, y});
+                });
+
+                // arêtes
+                ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+                ctx.fillStyle = 'rgba(0,0,0,0.35)';
+                links.forEach(l => {
+                    const src = String(l.source);
+                    const tgt = String(l.target);
+                    const p1 = positions.get(src);
+                    const p2 = positions.get(tgt);
+                    if (!p1 || !p2) return;
+
+                    const relType = String(l.relation_type || 'depends_on');
+                    const isSelected = selectedEdge && selectedEdge.from === src && selectedEdge.to === tgt && selectedEdge.type === relType;
+
+                    ctx.lineWidth = isSelected ? 3 : 1;
+                    ctx.strokeStyle = isSelected ? 'rgba(220,53,69,0.85)' : 'rgba(0,0,0,0.35)';
+                    ctx.fillStyle = isSelected ? 'rgba(220,53,69,0.85)' : 'rgba(0,0,0,0.35)';
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.stroke();
+
+                    edgeHitLines.push({
+                        x1: p1.x,
+                        y1: p1.y,
+                        x2: p2.x,
+                        y2: p2.y,
+                        from: src,
+                        to: tgt,
+                        type: relType
+                    });
+
+                    // flèche
+                    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+                    const arrowLen = 10;
+                    const arrowAngle = Math.PI / 7;
+
+                    ctx.beginPath();
+                    ctx.moveTo(p2.x, p2.y);
+                    ctx.lineTo(p2.x - arrowLen * Math.cos(angle - arrowAngle), p2.y - arrowLen * Math.sin(angle - arrowAngle));
+                    ctx.lineTo(p2.x - arrowLen * Math.cos(angle + arrowAngle), p2.y - arrowLen * Math.sin(angle + arrowAngle));
+                    ctx.closePath();
+                    ctx.fill();
+                });
+
+                // nœuds
+                nodes.forEach(id => {
+                    const p = positions.get(String(id));
+                    if (!p) return;
+
+                    const label = String(id);
+                    const padX = 10;
+                    const padY = 6;
+                    ctx.font = '12px sans-serif';
+                    const textW = ctx.measureText(label).width;
+                    const boxW = textW + padX * 2;
+                    const boxH = 22;
+
+                    nodeHitBoxes.set(String(id), {
+                        x: p.x - boxW / 2,
+                        y: p.y - boxH / 2,
+                        w: boxW,
+                        h: boxH,
+                        cx: p.x,
+                        cy: p.y
+                    });
+
+                    const isSelected = selectedNodeId && String(selectedNodeId) === String(id);
+
+                    ctx.fillStyle = isSelected ? '#dc3545' : '#667eea';
+                    ctx.strokeStyle = isSelected ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.15)';
+                    ctx.beginPath();
+                    ctx.roundRect(p.x - boxW / 2, p.y - boxH / 2, boxW, boxH, 8);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#fff';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(label, p.x, p.y);
+                });
+            }
+
+            function findNodeAt(x, y) {
+                for (const [id, b] of nodeHitBoxes.entries()) {
+                    if (x >= b.x && x <= (b.x + b.w) && y >= b.y && y <= (b.y + b.h)) {
+                        return id;
+                    }
+                }
+                return null;
+            }
+
+            function findEdgeAt(x, y) {
+                let best = null;
+                let bestD = Infinity;
+                for (const e of edgeHitLines) {
+                    const d = distancePointToSegment(x, y, e.x1, e.y1, e.x2, e.y2);
+                    if (d < bestD) {
+                        bestD = d;
+                        best = e;
+                    }
+                }
+                if (best && bestD <= 8) {
+                    return {from: best.from, to: best.to, type: best.type};
+                }
+                return null;
+            }
+
+            function initGraphInteractions() {
+                const canvas = document.getElementById('graphCanvas');
+                if (!canvas) return;
+
+                canvas.addEventListener('click', async (evt) => {
+                    const rect = canvas.getBoundingClientRect();
+                    const x = evt.clientX - rect.left;
+                    const y = evt.clientY - rect.top;
+
+                    const node = findNodeAt(x, y);
+                    const edge = node ? null : findEdgeAt(x, y);
+
+                    if (graphMode === 'add_link') {
+                        if (!node) {
+                            showAlert('graphAlert', 'Clique un node source', 'error');
+                            return;
+                        }
+
+                        if (!graphLinkFrom) {
+                            graphLinkFrom = node;
+                            selectedNodeId = node;
+                            selectedEdge = null;
+                            setGraphStatus(`Mode: + lien (source=${node}) → clique la cible`);
+                            updateGraphActionsUI();
+                            drawGraph();
+                            return;
+                        }
+
+                        const from = graphLinkFrom;
+                        const to = node;
+                        const type = getGraphRelationType();
+
+                        graphLinkFrom = null;
+                        await addLinkFromGraph(from, to, type);
+                        setGraphMode('select');
+                        return;
+                    }
+
+                    if (graphMode === 'remove_link') {
+                        if (!node) {
+                            showAlert('graphAlert', 'Clique un node source', 'error');
+                            return;
+                        }
+
+                        if (!graphLinkFrom) {
+                            graphLinkFrom = node;
+                            selectedNodeId = node;
+                            selectedEdge = null;
+                            setGraphStatus(`Mode: - lien (source=${node}) → clique la cible`);
+                            updateGraphActionsUI();
+                            drawGraph();
+                            return;
+                        }
+
+                        const from = graphLinkFrom;
+                        const to = node;
+                        const type = getGraphRelationType();
+
+                        graphLinkFrom = null;
+                        await removeLinkFromGraph(from, to, type);
+                        setGraphMode('select');
+                        return;
+                    }
+
+                    if (node) {
+                        selectedNodeId = node;
+                        selectedEdge = null;
+                        setGraphStatus(`Sélection: node=${node}`);
+                        updateGraphActionsUI();
+                        drawGraph();
+                        return;
+                    }
+
+                    if (edge) {
+                        selectedEdge = edge;
+                        selectedNodeId = null;
+                        setGraphStatus(`Sélection: lien=${edge.from} → ${edge.to} (${edge.type})`);
+                        updateGraphActionsUI();
+                        drawGraph();
+                        return;
+                    }
+
+                    selectedNodeId = null;
+                    selectedEdge = null;
+                    setGraphStatus('Mode: sélection');
+                    updateGraphActionsUI();
+                    drawGraph();
+                });
+            }
+
+            function updateGraphActionsUI() {
+                const actions = document.getElementById('graphActions');
+                if (!actions) return;
+
+                actions.style.display = 'block';
+                const selectionEl = document.getElementById('graphSelectionText');
+                const hintEl = document.getElementById('graphHintText');
+
+                if (selectionEl) {
+                    if (selectedEdge) {
+                        selectionEl.textContent = `Sélection: lien ${selectedEdge.from} → ${selectedEdge.to} (${selectedEdge.type})`;
+                    } else if (selectedNodeId) {
+                        selectionEl.textContent = `Sélection: conteneur ${selectedNodeId}`;
+                    } else {
+                        selectionEl.textContent = 'Sélection: aucune';
+                    }
+                }
+
+                if (hintEl) {
+                    if (graphMode === 'add_link') {
+                        hintEl.textContent = graphLinkFrom ? 'Clique la cible pour créer la relation.' : 'Clique un node source.';
+                    } else if (graphMode === 'remove_link') {
+                        hintEl.textContent = graphLinkFrom ? 'Clique la cible pour supprimer la relation.' : 'Clique un node source.';
+                    } else {
+                        hintEl.textContent = 'Astuce: clique un node pour le sélectionner.';
+                    }
+                }
+            }
+
+            // Afficher une alerte
+            function showAlert(elementId, message, type) {
+                const alert = document.getElementById(elementId);
+                alert.className = `alert alert-${type}`;
+                alert.textContent = message;
+                setTimeout(() => alert.textContent = '', 5000);
+            }
+
+            // Initialisation
+            window.onload = function() {
+                refreshContainers();
+                updateMonitorSelect();
+                initMetricsChart();
+                refreshGraph();
+                initGraphInteractions();
+                updateGraphActionsUI();
+                
+                // Actualisation automatique
+                setInterval(refreshContainers, 10000);
+                setInterval(refreshTrafficStatus, 2000);
+                setInterval(refreshGraph, 5000);
+            };
+        </script>
+    </body>
+</html>

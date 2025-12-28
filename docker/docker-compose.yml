@@ -1,0 +1,72 @@
+
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: orchestrator_mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - orchestrator_network
+    environment:
+      MONGO_INITDB_DATABASE: orchestrator_db
+
+  main:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.main
+    container_name: orchestrator_main
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./models:/app/models
+      - ./data:/app/data
+    networks:
+      - orchestrator_network
+    depends_on:
+      - mongodb
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017/
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  worker1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.slave
+    container_name: worker_1
+    ports:
+      - "5001:5001"
+    networks:
+      - orchestrator_network
+    environment:
+      - CONTAINER_NAME=worker_1
+      - ORCHESTRATOR_URL=http://main:5000
+    depends_on:
+      - main
+
+  worker2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.slave
+    container_name: worker_2
+    ports:
+      - "5002:5001"
+    networks:
+      - orchestrator_network
+    environment:
+      - CONTAINER_NAME=worker_2
+      - ORCHESTRATOR_URL=http://main:5000
+    depends_on:
+      - main
+
+networks:
+  orchestrator_network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
