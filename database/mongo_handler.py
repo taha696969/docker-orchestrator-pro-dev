@@ -123,6 +123,20 @@ class MongoHandler:
             print(f"Erreur suppression relation: {e}")
             return 0
     
+    def remove_relations_for_container(self, container_name):
+        try:
+            query = {
+                '$or': [
+                    {'from_container': container_name},
+                    {'to_container': container_name}
+                ]
+            }
+            result = self.relations.delete_many(query)
+            return int(getattr(result, 'deleted_count', 0))
+        except Exception as e:
+            print(f"Erreur suppression relations conteneur: {e}")
+            return 0
+    
     def get_container_relations(self, container_name):
         """Récupérer toutes les relations d'un conteneur"""
         try:

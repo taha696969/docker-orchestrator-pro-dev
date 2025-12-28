@@ -52,6 +52,25 @@ class GraphManager:
                 del self.container_metadata[container_name]
             print(f"❌ Conteneur retiré du graphe: {container_name}")
     
+    def prune_to_nodes(self, alive_nodes):
+        """Supprime du graphe les nœuds qui ne font pas partie de alive_nodes."""
+        try:
+            keep = set(str(n) for n in (alive_nodes or []))
+        except Exception:
+            keep = set()
+
+        for node in list(self.graph.nodes()):
+            if str(node) not in keep:
+                try:
+                    self.graph.remove_node(node)
+                except Exception:
+                    pass
+                try:
+                    if node in self.container_metadata:
+                        del self.container_metadata[node]
+                except Exception:
+                    pass
+    
     def get_dependent_containers(self, container_name):
         """Récupérer tous les conteneurs qui dépendent d'un conteneur donné"""
         if container_name not in self.graph:

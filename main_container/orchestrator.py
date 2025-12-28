@@ -83,6 +83,11 @@ class ContainerOrchestrator:
         self.traffic_jobs = {}
         self.traffic_lock = threading.Lock()
 
+        self.max_replicas_per_container = int(os.getenv('MAX_REPLICAS_PER_CONTAINER', '2'))
+        self.idle_replica_seconds = int(os.getenv('IDLE_REPLICA_SECONDS', '300'))
+        self.idle_replica_cpu_threshold = float(os.getenv('IDLE_REPLICA_CPU_THRESHOLD', '5'))
+        self.last_request_at = {}
+
         self._hydrate_graph_from_db()
 
         # Découvrir les conteneurs déjà démarrés (ex: worker_1/worker_2 via docker-compose)
@@ -93,6 +98,9 @@ class ContainerOrchestrator:
         self.monitoring_thread = threading.Thread(target=self.monitor_containers, daemon=True)
         self.monitoring_thread.start()
         print("  ✓ Monitoring démarré")
+
+        self.replica_cleanup_thread = threading.Thread(target=self.cleanup_idle_replicas, daemon=True)
+        self.replica_cleanup_thread.start()
 
         print("✅ Orchestrateur initialisé avec succès\n")
 
@@ -124,6 +132,11 @@ class ContainerOrchestrator:
                 'created_at': datetime.now()
             }
 
+            try:
+                self.last_request_at[container_name] = time.time()
+            except Exception:
+                pass
+
             # Ajouter au graphe
             self.graph_manager.add_container(container_name, {
                 'image': image_name,
@@ -153,25 +166,142 @@ class ContainerOrchestrator:
             traceback.print_exc()
             return None
 
+    def _next_replica_name(self, original_name):
+        try:
+            for i in range(1, 1000):
+                candidate = f"{original_name}_replica_{i}"
+                if candidate in self.active_containers:
+                    continue
+                try:
+                    self.docker_client.containers.get(candidate)
+                    continue
+                except Exception:
+                    return candidate
+        except Exception:
+            return None
+        return None
+
+    def cleanup_idle_replicas(self):
+        while True:
+            try:
+                now = time.time()
+                for name, info in list(self.active_containers.items()):
+                    try:
+                        if '_replica_' not in name:
+                            continue
+
+                        last = self.last_request_at.get(name)
+                        if last is None:
+                            continue
+                        if (now - float(last)) < float(self.idle_replica_seconds):
+                            continue
+
+                        cpu_ok = True
+                        try:
+                            metrics = self.container_metrics.get(name)
+                            if metrics:
+                                cpu = float(metrics[-1].get('cpu_percent', 0))
+                                cpu_ok = cpu <= float(self.idle_replica_cpu_threshold)
+                        except Exception:
+                            cpu_ok = True
+
+                        if not cpu_ok:
+                            continue
+
+                        parent = None
+                        try:
+                            parent = info.get('parent')
+                        except Exception:
+                            parent = None
+                        if not parent:
+                            try:
+                                if '_replica_' in name:
+                                    parent = name.rsplit('_replica_', 1)[0]
+                            except Exception:
+                                parent = None
+
+                        try:
+                            container = info.get('container')
+                            if container is None:
+                                container = self.docker_client.containers.get(name)
+                        except Exception:
+                            container = None
+
+                        if container is not None:
+                            try:
+                                container.stop()
+                            except Exception:
+                                pass
+                            try:
+                                container.remove()
+                            except Exception:
+                                pass
+
+                        try:
+                            del self.active_containers[name]
+                        except Exception:
+                            pass
+
+                        if parent and parent in self.active_containers:
+                            try:
+                                reps = self.active_containers[parent].get('replicas', [])
+                                self.active_containers[parent]['replicas'] = [r for r in reps if r != name]
+                            except Exception:
+                                pass
+
+                        try:
+                            self.graph_manager.remove_container(name)
+                        except Exception:
+                            pass
+
+                        try:
+                            self.mongo_handler.remove_relations_for_container(name)
+                        except Exception:
+                            pass
+
+                        try:
+                            self.mongo_handler.update_container_status(name, 'removed')
+                        except Exception:
+                            pass
+
+                        try:
+                            self.last_request_at.pop(name, None)
+                        except Exception:
+                            pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                time.sleep(10)
+            except Exception:
+                pass
+
     def discover_existing_containers(self):
         """Découvrir et inscrire les conteneurs déjà en cours d'exécution sur le réseau."""
         try:
             containers = self.docker_client.containers.list()
+
             excluded = {
                 'orchestrator_main',
                 'orchestrator_mongodb',
                 'orchestrator_web'
             }
 
+            alive_on_network = set()
+
             pending_replica_links = []
 
             for container in containers:
                 try:
-                    if container.name in self.active_containers:
-                        continue
-
                     networks = container.attrs.get('NetworkSettings', {}).get('Networks', {})
                     if self.network_name not in networks:
+                        continue
+
+                    alive_on_network.add(container.name)
+
+                    if container.name in self.active_containers:
                         continue
 
                     # Toujours ajouter au graphe (même si exclu du monitoring)
@@ -192,6 +322,12 @@ class ContainerOrchestrator:
                         'replicas': [],
                         'created_at': datetime.now()
                     }
+
+                    try:
+                        self.last_request_at.setdefault(container.name, time.time())
+                    except Exception:
+                        pass
+
                     self.graph_manager.add_container(container.name, {
                         'image': container.attrs.get('Config', {}).get('Image'),
                         'created_at': datetime.now()
@@ -241,6 +377,31 @@ class ContainerOrchestrator:
                         pass
                 except Exception:
                     continue
+
+            # Nettoyage: retirer du cache et du graphe les conteneurs qui n'existent plus
+            try:
+                for name in list(self.active_containers.keys()):
+                    if name not in alive_on_network:
+                        try:
+                            del self.active_containers[name]
+                        except Exception:
+                            pass
+                        try:
+                            self.graph_manager.remove_container(name)
+                        except Exception:
+                            pass
+                        try:
+                            self.mongo_handler.update_container_status(name, 'removed')
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Prune graph to currently alive containers to avoid stale nodes
+            try:
+                self.graph_manager.prune_to_nodes(alive_on_network)
+            except Exception:
+                pass
 
             if self.active_containers:
                 print(f"  ✓ Conteneurs découverts: {list(self.active_containers.keys())}")
@@ -368,6 +529,9 @@ class ContainerOrchestrator:
                 print(f"✗ Conteneur {container_name} introuvable")
                 return
 
+            if '_replica_' in container_name:
+                return
+
             # Obtenir les conteneurs à dupliquer (cascade via graphe)
             scaling_targets = self.graph_manager.suggest_scaling_targets(container_name)
             related_containers = scaling_targets.get('all_targets', [])
@@ -382,6 +546,8 @@ class ContainerOrchestrator:
                 # Dupliquer les conteneurs liés
                 for related in related_containers:
                     if related == container_name:
+                        continue
+                    if '_replica_' in str(related):
                         continue
                     if related in self.active_containers:
                         r = self._create_replica(related)
@@ -422,12 +588,21 @@ class ContainerOrchestrator:
             if original_name not in self.active_containers:
                 return None
 
+            if '_replica_' in original_name:
+                return None
+
+            try:
+                if len(self.active_containers[original_name].get('replicas', [])) >= self.max_replicas_per_container:
+                    return None
+            except Exception:
+                pass
+
             original_container = self.active_containers[original_name]['container']
             original_container.reload()
 
-            # Générer un nom unique
-            replica_count = len(self.active_containers[original_name]['replicas'])
-            replica_name = f"{original_name}_replica_{replica_count + 1}"
+            replica_name = self._next_replica_name(original_name)
+            if not replica_name:
+                return None
 
             # Récupérer la configuration
             config = original_container.attrs
@@ -452,6 +627,11 @@ class ContainerOrchestrator:
                 'created_at': datetime.now(),
                 'parent': original_name
             }
+
+            try:
+                self.last_request_at[replica_name] = time.time()
+            except Exception:
+                pass
 
             try:
                 self.graph_manager.add_container(replica_name, {
@@ -500,6 +680,10 @@ class ContainerOrchestrator:
             if isinstance(payload, dict) and payload.get('__direct_instance'):
                 payload = dict(payload)
                 payload.pop('__direct_instance', None)
+                try:
+                    self.last_request_at[str(container_name)] = time.time()
+                except Exception:
+                    pass
                 return self._send_request_to_container(container_name, payload)
         except Exception:
             pass
@@ -509,6 +693,10 @@ class ContainerOrchestrator:
             instances.extend(self.active_containers[container_name]['replicas'])
 
         best_instance = self._select_best_instance(instances)
+        try:
+            self.last_request_at[str(best_instance)] = time.time()
+        except Exception:
+            pass
         return self._send_request_to_container(best_instance, payload)
 
     def _select_best_instance(self, instances):
@@ -576,6 +764,8 @@ class ContainerOrchestrator:
         traffic_id = str(uuid.uuid4())
         stop_event = threading.Event()
 
+        started_ts = time.time()
+
         job = {
             'id': traffic_id,
             'target': target_container,
@@ -584,12 +774,18 @@ class ContainerOrchestrator:
             'duration_seconds': duration_seconds,
             'direct': True,
             'started_at': datetime.now().isoformat(),
+            'started_ts': started_ts,
             'stopped_at': None,
+            'stopped_ts': None,
             'sent': 0,
             'errors': 0,
             'last_error': None,
             'last_target': None,
             'last_status_code': None,
+            'last_latency_ms': None,
+            'latencies_ms': [],
+            'latency_sum_ms': 0.0,
+            'latency_count': 0,
             'running': True
         }
 
@@ -611,10 +807,33 @@ class ContainerOrchestrator:
                     if job.get('direct'):
                         payload['__direct_instance'] = True
 
+                    t0 = time.time()
                     result = self.route_request(target_container, payload)
+                    dt_ms = (time.time() - t0) * 1000.0
                     with self.traffic_lock:
                         job['last_target'] = result.get('target') if isinstance(result, dict) else None
                         job['last_status_code'] = result.get('status_code') if isinstance(result, dict) else None
+                        try:
+                            job['last_latency_ms'] = float(dt_ms)
+                        except Exception:
+                            job['last_latency_ms'] = None
+
+                        try:
+                            job['latency_sum_ms'] = float(job.get('latency_sum_ms', 0.0)) + float(dt_ms)
+                            job['latency_count'] = int(job.get('latency_count', 0)) + 1
+                        except Exception:
+                            pass
+
+                        try:
+                            lat = job.get('latencies_ms')
+                            if not isinstance(lat, list):
+                                lat = []
+                                job['latencies_ms'] = lat
+                            lat.append(float(dt_ms))
+                            if len(lat) > 2000:
+                                del lat[:len(lat) - 2000]
+                        except Exception:
+                            pass
 
                         if isinstance(result, dict) and result.get('error'):
                             job['errors'] += 1
@@ -632,6 +851,10 @@ class ContainerOrchestrator:
             with self.traffic_lock:
                 job['running'] = False
                 job['stopped_at'] = datetime.now().isoformat()
+                try:
+                    job['stopped_ts'] = time.time()
+                except Exception:
+                    job['stopped_ts'] = None
 
         thread = threading.Thread(target=_traffic_loop, daemon=True)
         with self.traffic_lock:
@@ -654,7 +877,174 @@ class ContainerOrchestrator:
 
     def list_traffic(self):
         with self.traffic_lock:
-            return [item['job'] for item in self.traffic_jobs.values()]
+            jobs = [item['job'] for item in self.traffic_jobs.values()]
+        try:
+            def _key(j):
+                try:
+                    ts = j.get('started_ts')
+                    if ts is not None:
+                        return float(ts)
+                except Exception:
+                    pass
+                try:
+                    s = j.get('started_at')
+                    if s:
+                        return datetime.fromisoformat(str(s)).timestamp()
+                except Exception:
+                    pass
+                return 0.0
+
+            jobs.sort(key=_key)
+        except Exception:
+            pass
+        return jobs
+
+    def get_metrics_summary(self, traffic_id=None):
+        summary = {
+            'traffic': None,
+            'resources': {},
+            'scaling': {}
+        }
+
+        try:
+            with self.traffic_lock:
+                jobs = [item.get('job') for item in self.traffic_jobs.values() if item.get('job')]
+
+            job = None
+            if traffic_id:
+                for j in jobs:
+                    if str(j.get('id')) == str(traffic_id):
+                        job = j
+                        break
+            if job is None and jobs:
+                try:
+                    def _key(j):
+                        try:
+                            ts = j.get('started_ts')
+                            if ts is not None:
+                                return float(ts)
+                        except Exception:
+                            pass
+                        try:
+                            s = j.get('started_at')
+                            if s:
+                                return datetime.fromisoformat(str(s)).timestamp()
+                        except Exception:
+                            pass
+                        return 0.0
+
+                    jobs = sorted(jobs, key=_key)
+                except Exception:
+                    pass
+                job = jobs[-1]
+
+            if job:
+                now_ts = time.time()
+                started_ts = float(job.get('started_ts') or now_ts)
+                end_ts = now_ts
+                try:
+                    if not bool(job.get('running')):
+                        st = job.get('stopped_ts')
+                        if st is not None:
+                            end_ts = float(st)
+                except Exception:
+                    end_ts = now_ts
+                elapsed_s = max(0.001, end_ts - started_ts)
+
+                sent = int(job.get('sent', 0) or 0)
+                errors = int(job.get('errors', 0) or 0)
+                total = max(0, sent + errors)
+
+                throughput = sent / elapsed_s
+                error_rate = (errors / total) * 100.0 if total > 0 else 0.0
+
+                latencies = job.get('latencies_ms')
+                if not isinstance(latencies, list):
+                    latencies = []
+
+                mean_ms = None
+                try:
+                    c = int(job.get('latency_count', 0) or 0)
+                    s = float(job.get('latency_sum_ms', 0.0) or 0.0)
+                    mean_ms = (s / c) if c > 0 else None
+                except Exception:
+                    mean_ms = None
+
+                summary['traffic'] = {
+                    'id': job.get('id'),
+                    'target': job.get('target'),
+                    'running': bool(job.get('running')),
+                    'sent': sent,
+                    'errors': errors,
+                    'throughput_rps': float(throughput),
+                    'error_rate_percent': float(error_rate),
+                    'latency_last_ms': job.get('last_latency_ms'),
+                    'latency_mean_ms': mean_ms,
+                    'latency_p50_ms': self._percentile(latencies, 50),
+                    'latency_p95_ms': self._percentile(latencies, 95),
+                    'latency_p99_ms': self._percentile(latencies, 99)
+                }
+        except Exception:
+            summary['traffic'] = None
+
+        try:
+            latest_cpu = []
+            latest_mem = []
+            peak_mem = 0.0
+            for name, series in (self.container_metrics or {}).items():
+                if not series:
+                    continue
+                try:
+                    last = series[-1]
+                    latest_cpu.append(float(last.get('cpu_percent', 0) or 0))
+                    latest_mem.append(float(last.get('memory_percent', 0) or 0))
+                except Exception:
+                    pass
+
+                try:
+                    for m in series[-100:]:
+                        peak_mem = max(peak_mem, float(m.get('memory_percent', 0) or 0))
+                except Exception:
+                    pass
+
+            cpu_avg = (sum(latest_cpu) / len(latest_cpu)) if latest_cpu else None
+            mem_avg = (sum(latest_mem) / len(latest_mem)) if latest_mem else None
+            replicas_current = 0
+            try:
+                replicas_current = sum(1 for n in (self.active_containers or {}).keys() if '_replica_' in str(n))
+            except Exception:
+                replicas_current = 0
+
+            summary['resources'] = {
+                'containers_count': int(len(self.active_containers or {})),
+                'replicas_current': int(replicas_current),
+                'cpu_avg_percent': cpu_avg,
+                'memory_avg_percent': mem_avg,
+                'memory_peak_percent': float(peak_mem)
+            }
+        except Exception:
+            summary['resources'] = {}
+
+        try:
+            hist = self.mongo_handler.get_scaling_history(limit=50) or []
+            summary['scaling'] = {
+                'events_last_50': int(len(hist))
+            }
+        except Exception:
+            summary['scaling'] = {}
+
+        return summary
+
+    def _percentile(self, values, p):
+        try:
+            if not values:
+                return None
+            arr = np.array(values, dtype=float)
+            if arr.size == 0:
+                return None
+            return float(np.percentile(arr, float(p)))
+        except Exception:
+            return None
 
 
 # Instance globale
@@ -811,6 +1201,16 @@ def traffic_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/metrics/summary', methods=['GET'])
+def metrics_summary():
+    try:
+        traffic_id = request.args.get('traffic_id')
+        summary = orchestrator.get_metrics_summary(traffic_id=traffic_id)
+        return jsonify(summary)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/containers/list', methods=['GET'])
 def list_containers():
     orchestrator.discover_existing_containers()
@@ -856,23 +1256,67 @@ def remove_container(name):
     try:
         if name == 'orchestrator_main':
             return jsonify({'error': 'Cannot remove orchestrator_main'}), 400
+
+        container = None
         if name in orchestrator.active_containers:
-            container = orchestrator.active_containers[name]['container']
-            container.stop()
-            container.remove()
-            del orchestrator.active_containers[name]
+            container = orchestrator.active_containers[name].get('container')
+        if container is None:
+            try:
+                container = orchestrator.docker_client.containers.get(name)
+            except Exception:
+                container = None
+
+        if container is not None:
+            try:
+                container.stop()
+            except Exception:
+                pass
+            try:
+                container.remove()
+            except Exception:
+                pass
+
+        if name in orchestrator.active_containers:
+            try:
+                del orchestrator.active_containers[name]
+            except Exception:
+                pass
+
+        try:
+            orchestrator.last_request_at.pop(name, None)
+        except Exception:
+            pass
+
+        try:
+            parent = None
+            if '_replica_' in name:
+                parent = name.rsplit('_replica_', 1)[0]
+            if parent and parent in orchestrator.active_containers:
+                reps = orchestrator.active_containers[parent].get('replicas', [])
+                orchestrator.active_containers[parent]['replicas'] = [r for r in reps if r != name]
+        except Exception:
+            pass
+
+        try:
             orchestrator.graph_manager.remove_container(name)
+        except Exception:
+            pass
+
+        try:
+            orchestrator.mongo_handler.remove_relations_for_container(name)
+        except Exception:
+            pass
+
+        try:
             orchestrator.mongo_handler.update_container_status(name, 'removed')
-            return jsonify({'status': 'removed', 'name': name})
-        return jsonify({'error': 'Container not found'}), 404
+        except Exception:
+            pass
+
+        if container is None:
+            return jsonify({'status': 'removed_from_graph', 'name': name})
+        return jsonify({'status': 'removed', 'name': name})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
-@app.route('/graph/stats', methods=['GET'])
-def get_graph_stats():
-    stats = orchestrator.graph_manager.get_graph_stats()
-    return jsonify(stats)
 
 
 @app.route('/graph/export', methods=['GET'])

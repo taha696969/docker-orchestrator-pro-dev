@@ -17,8 +17,6 @@ docker-compose.override.yml
 # Data
 data/
 *.pkl
-*.h5
-*.model
 
 # Logs
 logs/
@@ -32,6 +30,14 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local UI backups
+interface/interface.html.bak
+interface/interface.html.broken*
+interface/*.bak
+interface/*.broken*
+*.bak
+*.broken*
 
 # Models
 models/*.pkl
