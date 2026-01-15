@@ -53,6 +53,14 @@
             transform: translateY(-5px);
         }
 
+        .graph-card:hover {
+            transform: none !important;
+        }
+
+        .graph-card {
+            transform: none !important;
+        }
+
         .card h2 {
             color: #667eea;
             margin-bottom: 20px;
@@ -169,10 +177,11 @@
 
         #graphCanvas {
             width: 100% !important;
-            height: 360px !important;
+            height: 420px !important;
             background: white;
             border-radius: 10px;
-            padding: 20px;
+            padding: 0;
+            display: block;
         }
 
         .chart-container {
@@ -257,6 +266,12 @@
         .graph-actions-row {
             display: flex;
             flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .graph-actions-row button {
+            width: auto;
+            margin-top: 0;
         }
 
         .graph-context-menu {
@@ -438,7 +453,7 @@
             </div>
 
             <!-- Graphe de dépendances -->
-            <div class="card" style="margin-bottom: 20px;">
+            <div class="card graph-card" style="margin-bottom: 20px;">
                 <h2>🌐 Graphe de Dépendances</h2>
                 <canvas id="graphCanvas"></canvas>
                 <div id="graphAlert"></div>
@@ -453,31 +468,6 @@
                         <button class="danger" onclick="removeSelectedEdgeFromGraph()">Supprimer lien sélectionné</button>
                     </div>
                     <div class="graph-actions-title" id="graphHintText" style="margin-top: 8px;">Astuce: clique un node pour le sélectionner.</div>
-                </div>
-
-                <div class="graph-context-menu" id="graphContextMenu">
-                    <div class="graph-context-title">
-                        <div id="graphContextTitle">Sélection</div>
-                        <button type="button" onclick="hideGraphContextMenu()">Fermer</button>
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <select id="graphContextRelationType">
-                            <option value="depends_on">Dépend de</option>
-                            <option value="communicates_with">Communique avec</option>
-                            <option value="uses">Utilise</option>
-                            <option value="master_of">Master → Worker</option>
-                            <option value="replica_of">Replica → Parent</option>
-                        </select>
-                    </div>
-                    <div class="graph-context-row" id="graphContextNodeActions">
-                        <button class="secondary" type="button" onclick="startAddLinkFromSelected()">+ relation</button>
-                        <button class="secondary" type="button" onclick="startRemoveLinkFromSelected()">- relation</button>
-                        <button type="button" onclick="createContainerLinkedFromSelected()">+ conteneur</button>
-                        <button class="danger" type="button" onclick="deleteSelectedFromGraph()">Supprimer conteneur</button>
-                    </div>
-                    <div class="graph-context-row" id="graphContextEdgeActions" style="display:none; margin-top: 8px;">
-                        <button class="danger" type="button" onclick="removeSelectedEdgeFromGraph()">Supprimer lien</button>
-                    </div>
                 </div>
             </div>
 
@@ -1198,7 +1188,9 @@
                     return;
                 }
 
-                const url = currentTrafficJobId ? `${API_URL}/metrics/summary?traffic_id=${encodeURIComponent(currentTrafficJobId)}` : `${API_URL}/metrics/summary`;
+                const params = new URLSearchParams();
+                params.set('live', '1');
+                const url = `${API_URL}/metrics/summary?${params.toString()}`;
                 const response = await fetch(url);
                 if (!response.ok) {
                     if (response.status === 404) {
@@ -1253,7 +1245,7 @@
                 if (avgLoad && resources.cpu_avg_percent !== undefined && resources.cpu_avg_percent !== null) {
                     avgLoad.textContent = `${formatNumber(resources.cpu_avg_percent, 1)}%`;
                 }
-                setEvalStatus('Source: backend /metrics/summary');
+                setEvalStatus('Source: docker (backend /metrics/summary)');
             } catch (e) {
                 try {
                     await refreshEvaluationMetricsFallback();
@@ -1334,7 +1326,10 @@
 
         function hideGraphContextMenu() {
             const menu = document.getElementById('graphContextMenu');
-            if (menu) menu.style.display = 'none';
+            if (menu) {
+                menu.style.display = 'none';
+                menu.style.visibility = 'hidden';
+            }
             graphContextOpen = false;
         }
 
@@ -1344,8 +1339,9 @@
 
             const pad = 10;
             menu.style.display = 'block';
-            menu.style.left = `${clientX + pad}px`;
-            menu.style.top = `${clientY + pad}px`;
+            menu.style.visibility = 'hidden';
+            menu.style.left = '0px';
+            menu.style.top = '0px';
 
             const rect = menu.getBoundingClientRect();
             let left = clientX + pad;
@@ -1358,8 +1354,31 @@
             }
             menu.style.left = `${left}px`;
             menu.style.top = `${top}px`;
+            menu.style.visibility = 'visible';
 
             graphContextOpen = true;
+        }
+
+        function showGraphContextMenuNearNode(nodeId, fallbackClientX, fallbackClientY) {
+            try {
+                const canvas = document.getElementById('graphCanvas');
+                const b = nodeHitBoxes.get(String(nodeId));
+                if (canvas && b) {
+                    const rect = canvas.getBoundingClientRect();
+                    const scaleX = canvas.width ? (rect.width / canvas.width) : 1;
+                    const scaleY = canvas.height ? (rect.height / canvas.height) : 1;
+                    const cx = Number(b.cx);
+                    const cy = Number(b.cy);
+                    if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                        const x = rect.left + (cx * scaleX);
+                        const y = rect.top + (cy * scaleY);
+                        showGraphContextMenuAt(x, y);
+                        return;
+                    }
+                }
+            } catch (e) {
+            }
+            showGraphContextMenuAt(fallbackClientX, fallbackClientY);
         }
 
         function updateGraphContextMenuUI() {
@@ -1663,7 +1682,7 @@
             }
             const rect = canvas.getBoundingClientRect();
             canvas.width = Math.max(600, Math.floor(rect.width));
-            canvas.height = 420;
+            canvas.height = Math.max(420, Math.floor(rect.height));
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1802,7 +1821,12 @@
 
             const toCanvasPoint = (evt) => {
                 const rect = canvas.getBoundingClientRect();
-                return {x: evt.clientX - rect.left, y: evt.clientY - rect.top};
+                const scaleX = rect.width ? (canvas.width / rect.width) : 1;
+                const scaleY = rect.height ? (canvas.height / rect.height) : 1;
+                return {
+                    x: (evt.clientX - rect.left) * scaleX,
+                    y: (evt.clientY - rect.top) * scaleY
+                };
             };
 
             canvas.addEventListener('pointerdown', (evt) => {
@@ -1880,7 +1904,7 @@
                         updateGraphActionsUI();
                         drawGraph();
                         updateGraphContextMenuUI();
-                        showGraphContextMenuAt(evt.clientX, evt.clientY);
+                        showGraphContextMenuNearNode(selectedNodeId, evt.clientX, evt.clientY);
                         graphSuppressNextClick = true;
                         graphPointerDownNodeId = null;
                         graphPointerDownPoint = null;
@@ -1929,7 +1953,7 @@
                         updateGraphActionsUI();
                         drawGraph();
                         updateGraphContextMenuUI();
-                        showGraphContextMenuAt(evt.clientX, evt.clientY);
+                        showGraphContextMenuNearNode(selectedNodeId, evt.clientX, evt.clientY);
                         graphSuppressNextClick = true;
                     }
                     graphPointerDownNodeId = null;
@@ -1947,9 +1971,9 @@
                     graphPointerDownPoint = null;
                     return;
                 }
-                const rect = canvas.getBoundingClientRect();
-                const x = evt.clientX - rect.left;
-                const y = evt.clientY - rect.top;
+                const p = toCanvasPoint(evt);
+                const x = p.x;
+                const y = p.y;
 
                 const node = findNodeAt(x, y);
                 const edge = node ? null : findEdgeAt(x, y);
@@ -2017,7 +2041,7 @@
                     updateGraphActionsUI();
                     drawGraph();
                     updateGraphContextMenuUI();
-                    showGraphContextMenuAt(evt.clientX, evt.clientY);
+                    showGraphContextMenuNearNode(String(node), evt.clientX, evt.clientY);
                     return;
                 }
 
@@ -2097,6 +2121,31 @@
             setInterval(refreshEvaluationMetrics, 2000);
         };
     </script>
+
+    <div class="graph-context-menu" id="graphContextMenu">
+        <div class="graph-context-title">
+            <div id="graphContextTitle">Sélection</div>
+            <button type="button" onclick="hideGraphContextMenu()">Fermer</button>
+        </div>
+        <div style="margin-bottom: 8px;">
+            <select id="graphContextRelationType">
+                <option value="depends_on">Dépend de</option>
+                <option value="communicates_with">Communique avec</option>
+                <option value="uses">Utilise</option>
+                <option value="master_of">Master → Worker</option>
+                <option value="replica_of">Replica → Parent</option>
+            </select>
+        </div>
+        <div class="graph-context-row" id="graphContextNodeActions">
+            <button class="secondary" type="button" onclick="startAddLinkFromSelected()">+ relation</button>
+            <button class="secondary" type="button" onclick="startRemoveLinkFromSelected()">- relation</button>
+            <button type="button" onclick="createContainerLinkedFromSelected()">+ conteneur</button>
+            <button class="danger" type="button" onclick="deleteSelectedFromGraph()">Supprimer conteneur</button>
+        </div>
+        <div class="graph-context-row" id="graphContextEdgeActions" style="display:none; margin-top: 8px;">
+            <button class="danger" type="button" onclick="removeSelectedEdgeFromGraph()">Supprimer lien</button>
+        </div>
+    </div>
 </body>
 </html>
 

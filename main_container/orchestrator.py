@@ -7,7 +7,7 @@ import json
 import traceback
 import uuid
 from flask import Flask, request, jsonify
-from collections import defaultdict
+from collections import defaultdict, deque
 import numpy as np
 from datetime import datetime
 from flask_cors import CORS
@@ -83,10 +83,30 @@ class ContainerOrchestrator:
         self.traffic_jobs = {}
         self.traffic_lock = threading.Lock()
 
+        self._flux_lock = threading.Lock()
+        self._flux_events = defaultdict(deque)
+        self._flux_window_seconds = float(os.getenv('FLUX_WINDOW_SECONDS', '5'))
+
         self.max_replicas_per_container = int(os.getenv('MAX_REPLICAS_PER_CONTAINER', '2'))
+        try:
+            self.scaling_cooldown_seconds = int(os.getenv('SCALING_COOLDOWN_SECONDS', '60'))
+        except Exception:
+            self.scaling_cooldown_seconds = 60
         self.idle_replica_seconds = int(os.getenv('IDLE_REPLICA_SECONDS', '300'))
         self.idle_replica_cpu_threshold = float(os.getenv('IDLE_REPLICA_CPU_THRESHOLD', '5'))
         self.last_request_at = {}
+
+        self._ml_last_train_attempt = {}
+
+        try:
+            self._ml_min_train_points = int(os.getenv('ML_MIN_TRAIN_POINTS', '30'))
+        except Exception:
+            self._ml_min_train_points = 30
+
+        try:
+            self._flux_min_train_points = int(os.getenv('FLUX_MIN_TRAIN_POINTS', '5'))
+        except Exception:
+            self._flux_min_train_points = 5
 
         self._hydrate_graph_from_db()
 
@@ -443,7 +463,11 @@ class ContainerOrchestrator:
                 self.discover_existing_containers()
 
                 if not self.active_containers:
-                    time.sleep(5)
+                    try:
+                        interval_s = float(os.getenv('MONITOR_INTERVAL_SECONDS', '5'))
+                    except Exception:
+                        interval_s = 5.0
+                    time.sleep(interval_s)
                     continue
 
                 for container_name, container_info in list(self.active_containers.items()):
@@ -461,12 +485,18 @@ class ContainerOrchestrator:
                         metrics = self.metrics_collector.parse_stats(stats)
 
                         # Stocker les métriques
+                        flux_rps = 0.0
+                        try:
+                            flux_rps = float(self._get_flux_rps(container_name) or 0.0)
+                        except Exception:
+                            flux_rps = 0.0
                         self.container_metrics[container_name].append({
                             'timestamp': datetime.now().isoformat(),
                             'cpu_percent': metrics['cpu_percent'],
                             'memory_percent': metrics['memory_percent'],
                             'network_rx': metrics['network_rx'],
-                            'network_tx': metrics['network_tx']
+                            'network_tx': metrics['network_tx'],
+                            'flux_rps': flux_rps
                         })
 
                         # Limiter l'historique à 100 entrées
@@ -474,7 +504,12 @@ class ContainerOrchestrator:
                             self.container_metrics[container_name] = self.container_metrics[container_name][-100:]
 
                         # Sauvegarder dans MongoDB
-                        self.mongo_handler.insert_metrics(container_name, metrics)
+                        try:
+                            metrics_with_flux = dict(metrics or {})
+                            metrics_with_flux['flux_rps'] = flux_rps
+                        except Exception:
+                            metrics_with_flux = metrics
+                        self.mongo_handler.insert_metrics(container_name, metrics_with_flux)
 
                         # Vérifier si scaling nécessaire
                         self.check_scaling_need(container_name, metrics)
@@ -483,7 +518,11 @@ class ContainerOrchestrator:
                         print(f"⚠ Erreur monitoring {container_name}: {e}")
                         continue
 
-                time.sleep(5)
+                try:
+                    interval_s = float(os.getenv('MONITOR_INTERVAL_SECONDS', '5'))
+                except Exception:
+                    interval_s = 5.0
+                time.sleep(interval_s)
 
             except Exception as e:
                 print(f"⚠ Erreur boucle monitoring: {e}")
@@ -492,35 +531,165 @@ class ContainerOrchestrator:
     def check_scaling_need(self, container_name, current_metrics):
         """Vérifier si le conteneur nécessite un scaling"""
         try:
+            scale_target = container_name
+            if '_replica_' in str(container_name):
+                try:
+                    info = self.active_containers.get(container_name) or {}
+                    parent = info.get('parent')
+                    if not parent:
+                        parent = str(container_name).rsplit('_replica_', 1)[0]
+                    if parent:
+                        scale_target = parent
+                except Exception:
+                    pass
+
             # Éviter le scaling trop fréquent
-            if container_name in self.scaling_cooldown:
-                if (datetime.now() - self.scaling_cooldown[container_name]).seconds < 60:
+            if scale_target in self.scaling_cooldown:
+                if (datetime.now() - self.scaling_cooldown[scale_target]).seconds < int(self.scaling_cooldown_seconds or 60):
                     return
 
             # Récupérer l'historique
             historical_data = self.container_metrics[container_name][-20:]
 
-            if len(historical_data) < 10:
+            if len(historical_data) < 5:
                 return
 
             # Préparer les données pour le modèle ML
             cpu_values = [m['cpu_percent'] for m in historical_data]
             mem_values = [m['memory_percent'] for m in historical_data]
+            flux_values = [float(m.get('flux_rps', 0) or 0) for m in historical_data]
+
+            flux_max = 0.0
+            try:
+                flux_max = float(max(flux_values) if flux_values else 0.0)
+            except Exception:
+                flux_max = 0.0
+
+            try:
+                models_ready = True
+                flux_ready = True
+                if hasattr(self.ml_predictor, '_models_ready'):
+                    models_ready = bool(self.ml_predictor._models_ready())
+                if hasattr(self.ml_predictor, '_flux_model_ready'):
+                    flux_ready = bool(self.ml_predictor._flux_model_ready())
+
+                if (not models_ready) or (not flux_ready):
+                    now_ts = time.time()
+                    last_ts = float(self._ml_last_train_attempt.get(container_name, 0.0) or 0.0)
+                    if (now_ts - last_ts) >= 60.0:
+                        self._ml_last_train_attempt[container_name] = now_ts
+                        self._try_train_ml_from_mongo(container_name)
+            except Exception:
+                pass
 
             # Prédire la charge future
-            prediction = self.ml_predictor.predict_load(cpu_values, mem_values)
+            if flux_max <= 0.01:
+                prediction = self.ml_predictor.predict_load(
+                    cpu_values,
+                    mem_values,
+                    flux_values=None
+                )
+            else:
+                prediction = self.ml_predictor.predict_load(
+                    cpu_values,
+                    mem_values,
+                    flux_values=flux_values,
+                    flux_horizon=1
+                )
 
-            # Si prédiction dépasse le seuil
-            if prediction['predicted_cpu'] > self.load_threshold or prediction['should_scale']:
-                print(f"🚀 Scaling nécessaire pour {container_name}")
-                print(f"   CPU prédit: {prediction['predicted_cpu']:.2f}%")
+            try:
+                reasons = prediction.get('reasons') if isinstance(prediction, dict) else None
+                if reasons:
+                    print(f"ℹ Décision scaling {container_name}: {reasons}")
+            except Exception:
+                pass
+
+            should_scale = bool(isinstance(prediction, dict) and prediction.get('should_scale'))
+
+            if not should_scale:
+                try:
+                    flux_threshold = float(os.getenv('FLUX_SCALE_THRESHOLD_RPS', '5'))
+                except Exception:
+                    flux_threshold = 5.0
+
+                cpu_now = 0.0
+                try:
+                    cpu_now = float((current_metrics or {}).get('cpu_percent', 0) or 0)
+                except Exception:
+                    cpu_now = 0.0
+
+                flux_now = 0.0
+                try:
+                    flux_now = float(self._get_flux_rps(container_name) or 0.0)
+                except Exception:
+                    flux_now = 0.0
+
+                if (flux_now >= float(flux_threshold)) or (cpu_now >= float(self.load_threshold)):
+                    should_scale = True
+                    try:
+                        print(f"⚙ Failsafe scaling: cpu={cpu_now:.2f}% flux={flux_now:.2f}rps")
+                    except Exception:
+                        pass
+
+            try:
+                if (not bool(prediction.get('should_scale'))) and (prediction.get('predicted_flux_rps') is None):
+                    print(f"⚠ Scaling bloqué pour {container_name} car le modèle ML flux n'est pas encore entraîné")
+            except Exception:
+                pass
+
+            if should_scale:
+                print(f"🚀 Scaling nécessaire pour {scale_target}")
+                try:
+                    pflux = prediction.get('predicted_flux_rps')
+                    if pflux is not None:
+                        print(f"   Flux prédit: {float(pflux):.2f} rps")
+                except Exception:
+                    pass
+
+                try:
+                    pcpu = prediction.get('predicted_cpu')
+                    if pcpu is not None:
+                        print(f"   CPU prédit: {float(pcpu):.2f}%")
+                except Exception:
+                    pass
 
                 # Déclencher le scaling
-                self.scale_container(container_name)
-                self.scaling_cooldown[container_name] = datetime.now()
+                self.scale_container(scale_target)
+                self.scaling_cooldown[scale_target] = datetime.now()
 
         except Exception as e:
             print(f"⚠ Erreur check_scaling_need: {e}")
+
+    def _try_train_ml_from_mongo(self, container_name):
+        try:
+            coll = getattr(self.mongo_handler, 'metrics', None)
+            if coll is None:
+                return False
+
+            cursor = coll.find({'container_name': container_name}).sort('timestamp', 1).limit(600)
+            docs = list(cursor)
+            min_needed = int(min(int(self._ml_min_train_points or 30), int(self._flux_min_train_points or 5)))
+            if not docs or len(docs) < min_needed:
+                return False
+
+            historical_data = []
+            for d in docs:
+                try:
+                    historical_data.append({
+                        'timestamp': d.get('timestamp'),
+                        'cpu_percent': float(d.get('cpu_percent', 0) or 0),
+                        'memory_percent': float(d.get('memory_percent', 0) or 0),
+                        'flux_rps': float(d.get('flux_rps', 0) or 0)
+                    })
+                except Exception:
+                    continue
+
+            try:
+                return bool(self.ml_predictor.train_model(historical_data, flux_horizon=1))
+            except Exception:
+                return bool(self.ml_predictor.train_model(historical_data))
+        except Exception:
+            return False
 
     def scale_container(self, container_name):
         """Dupliquer un conteneur et ses dépendances"""
@@ -539,6 +708,11 @@ class ContainerOrchestrator:
             # Dupliquer le conteneur principal
             created_replicas = {}
             replica_name = self._create_replica(container_name)
+            if not replica_name:
+                try:
+                    print(f"⚠ Impossible de scaler {container_name}: limite de répliques atteinte ou création échouée")
+                except Exception:
+                    pass
             if replica_name:
                 created_replicas[container_name] = replica_name
 
@@ -593,6 +767,10 @@ class ContainerOrchestrator:
 
             try:
                 if len(self.active_containers[original_name].get('replicas', [])) >= self.max_replicas_per_container:
+                    try:
+                        print(f"⚠ Limite MAX_REPLICAS_PER_CONTAINER atteinte pour {original_name} ({self.max_replicas_per_container})")
+                    except Exception:
+                        pass
                     return None
             except Exception:
                 pass
@@ -684,6 +862,10 @@ class ContainerOrchestrator:
                     self.last_request_at[str(container_name)] = time.time()
                 except Exception:
                     pass
+                try:
+                    self._record_flux_event(str(container_name))
+                except Exception:
+                    pass
                 return self._send_request_to_container(container_name, payload)
         except Exception:
             pass
@@ -697,7 +879,38 @@ class ContainerOrchestrator:
             self.last_request_at[str(best_instance)] = time.time()
         except Exception:
             pass
+        try:
+            self._record_flux_event(str(best_instance))
+        except Exception:
+            pass
         return self._send_request_to_container(best_instance, payload)
+
+    def _record_flux_event(self, container_name):
+        try:
+            now = time.time()
+            with self._flux_lock:
+                dq = self._flux_events[str(container_name)]
+                dq.append(float(now))
+        except Exception:
+            return
+
+    def _get_flux_rps(self, container_name):
+        try:
+            window_s = float(self._flux_window_seconds or 5.0)
+            if window_s <= 0:
+                window_s = 5.0
+
+            now = time.time()
+            cutoff = now - window_s
+            with self._flux_lock:
+                dq = self._flux_events.get(str(container_name))
+                if not dq:
+                    return 0.0
+                while dq and float(dq[0]) < cutoff:
+                    dq.popleft()
+                return float(len(dq)) / float(window_s)
+        except Exception:
+            return 0.0
 
     def _select_best_instance(self, instances):
         """Sélectionner l'instance avec la charge la plus faible"""
@@ -899,7 +1112,7 @@ class ContainerOrchestrator:
             pass
         return jobs
 
-    def get_metrics_summary(self, traffic_id=None):
+    def get_metrics_summary(self, traffic_id=None, live=False):
         summary = {
             'traffic': None,
             'resources': {},
@@ -991,21 +1204,39 @@ class ContainerOrchestrator:
             latest_cpu = []
             latest_mem = []
             peak_mem = 0.0
-            for name, series in (self.container_metrics or {}).items():
-                if not series:
-                    continue
-                try:
-                    last = series[-1]
-                    latest_cpu.append(float(last.get('cpu_percent', 0) or 0))
-                    latest_mem.append(float(last.get('memory_percent', 0) or 0))
-                except Exception:
-                    pass
 
-                try:
-                    for m in series[-100:]:
-                        peak_mem = max(peak_mem, float(m.get('memory_percent', 0) or 0))
-                except Exception:
-                    pass
+            if bool(live):
+                for name, info in (self.active_containers or {}).items():
+                    try:
+                        container = info.get('container') if isinstance(info, dict) else None
+                        if container is None:
+                            container = self.docker_client.containers.get(name)
+                        container.reload()
+                        if container.status != 'running':
+                            continue
+                        stats = container.stats(stream=False)
+                        metrics = self.metrics_collector.parse_stats(stats)
+                        latest_cpu.append(float(metrics.get('cpu_percent', 0) or 0))
+                        latest_mem.append(float(metrics.get('memory_percent', 0) or 0))
+                        peak_mem = max(peak_mem, float(metrics.get('memory_percent', 0) or 0))
+                    except Exception:
+                        continue
+            else:
+                for name, series in (self.container_metrics or {}).items():
+                    if not series:
+                        continue
+                    try:
+                        last = series[-1]
+                        latest_cpu.append(float(last.get('cpu_percent', 0) or 0))
+                        latest_mem.append(float(last.get('memory_percent', 0) or 0))
+                    except Exception:
+                        pass
+
+                    try:
+                        for m in series[-100:]:
+                            peak_mem = max(peak_mem, float(m.get('memory_percent', 0) or 0))
+                    except Exception:
+                        pass
 
             cpu_avg = (sum(latest_cpu) / len(latest_cpu)) if latest_cpu else None
             mem_avg = (sum(latest_mem) / len(latest_mem)) if latest_mem else None
@@ -1020,7 +1251,8 @@ class ContainerOrchestrator:
                 'replicas_current': int(replicas_current),
                 'cpu_avg_percent': cpu_avg,
                 'memory_avg_percent': mem_avg,
-                'memory_peak_percent': float(peak_mem)
+                'memory_peak_percent': float(peak_mem),
+                'live': bool(live)
             }
         except Exception:
             summary['resources'] = {}
@@ -1205,7 +1437,8 @@ def traffic_status():
 def metrics_summary():
     try:
         traffic_id = request.args.get('traffic_id')
-        summary = orchestrator.get_metrics_summary(traffic_id=traffic_id)
+        live = str(request.args.get('live', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+        summary = orchestrator.get_metrics_summary(traffic_id=traffic_id, live=live)
         return jsonify(summary)
     except Exception as e:
         return jsonify({'error': str(e)}), 500

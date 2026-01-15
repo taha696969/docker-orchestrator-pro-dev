@@ -5,7 +5,7 @@ services:
     image: mongo:6.0
     container_name: orchestrator_mongodb
     ports:
-      - "27017:27017"
+      - "27018:27017"
     volumes:
       - mongodb_data:/data/db
     networks:
@@ -31,6 +31,12 @@ services:
     environment:
       - MONGO_URL=mongodb://mongodb:27017/
       - PYTHONUNBUFFERED=1
+      - MONITOR_INTERVAL_SECONDS=1
+      - FLUX_WINDOW_SECONDS=5
+      - FLUX_MIN_TRAIN_POINTS=5
+      - FLUX_SCALE_THRESHOLD_RPS=5
+      - MAX_REPLICAS_PER_CONTAINER=10
+      - SCALING_COOLDOWN_SECONDS=5
     restart: unless-stopped
 
   worker1:

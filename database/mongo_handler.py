@@ -53,6 +53,11 @@ class MongoHandler:
                 'block_read': metrics.get('block_read', 0),
                 'block_write': metrics.get('block_write', 0)
             }
+            try:
+                if 'flux_rps' in metrics:
+                    metrics_data['flux_rps'] = float(metrics.get('flux_rps') or 0.0)
+            except Exception:
+                pass
             self.metrics.insert_one(metrics_data)
             return True
         except Exception as e:
